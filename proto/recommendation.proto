@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package recommendation;
+
+option go_package = "recomendation_service/proto/recommendation;recommendation";
+
+// Service cung cấp các API liên quan đến gợi ý bất động sản
+service RecommendationService {
+    // Lấy danh sách gợi ý bất động sản cho người dùng (Real-time)
+    rpc GetRecommendations (RecommendRequest) returns (RecommendResponse);
+
+    // Tính toán trước danh sách gợi ý cho người dùng (Batch job)
+    rpc PrecomputeForUser (PrecomputeRequest) returns (PrecomputeResponse);
+}
+
+message RecommendRequest {
+    string user_id = 1;         // ID người dùng (để trống nếu chưa đăng nhập)
+    string session_id = 2;      // ID phiên truy cập (dành cho guest)
+    string real_estate_id = 3;  // ID bất động sản đang xem (nếu có)
+    double latitude = 4;        // Vĩ độ hiện tại của người dùng
+    double longitude = 5;       // Kinh độ hiện tại của người dùng
+    int32 limit = 12;            // Số lượng gợi ý yêu cầu (mặc định 12)
+}
+
+message RecommendResponse {
+    repeated string property_ids = 1; // Danh sách ID bất động sản gợi ý
+    string strategy = 2;              // Chiến lược gợi ý đã áp dụng ("content_based", "behavioral", "hybrid", "fallback")
+}
+
+message ViewedProperty {
+    string real_estate_id = 1; // ID bất động sản đã xem
+    int32 duration = 2;         // Thời gian xem (giây)
+    int64 viewed_at_unix = 3;   // Thời điểm xem (Unix timestamp)
+}
+
+message PrecomputeRequest {
+    string user_id = 1;                      // ID người dùng cần tính toán trước
+    repeated ViewedProperty view_history = 2; // Lịch sử xem gần nhất của người dùng
+    double latitude = 3;                     // Vĩ độ vị trí cuối cùng
+    double longitude = 4;                    // Kinh độ vị trí cuối cùng
+}
+
+message PrecomputeResponse {
+    bool success = 1;   // Trạng thái thành công hay thất bại
+    int32 count = 2;    // Số lượng gợi ý đã được tính toán và lưu vào cache
+}
