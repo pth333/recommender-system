@@ -59,9 +59,12 @@ class RecommendationGRPCHandler(recommendation_pb2_grpc.RecommendationServiceSer
 
             duration = (time.time() - start_time) * 1000
             logger.info(f"Hoàn thành GetRecommendations trong {duration:.2f}ms với chiến lược {strategy}")
+            
+            # Ép kiểu mọi phần tử trong list về string để khớp với repeated string trong proto
+            sanitized_ids = [str(p) for p in property_ids] if property_ids else []
 
             return recommendation_pb2.RecommendResponse(
-                property_ids=property_ids,
+                property_ids=sanitized_ids,
                 strategy=strategy
             )
 

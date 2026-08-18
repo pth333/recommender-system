@@ -1,6 +1,6 @@
 import math
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -16,20 +16,28 @@ class UserInterestAnalyzer:
         try:
             if user_id:
                 query = """
-                    SELECT real_estate_id, duration_seconds, UNIX_TIMESTAMP(created_at) as viewed_at_unix
+                    SELECT
+                    real_estate_id,
+                    COUNT(*) as total_views,
+                    SUM(duration_seconds) as total_duration,
+                    MAX(UNIX_TIMESTAMP(viewed_at)) as last_viewed_at_unix
                     FROM view_history
                     WHERE user_id = %s
-                    ORDER BY created_at DESC
-                    LIMIT 20
+                    GROUP BY real_estate_id
+                    ORDER BY last_viewed_at_unix DESC
                 """
                 cursor.execute(query, (user_id,))
             elif session_id:
                 query = """
-                    SELECT real_estate_id, duration_seconds, UNIX_TIMESTAMP(created_at) as viewed_at_unix
+                    SELECT
+                    real_estate_id,
+                    COUNT(*) as total_views,
+                    SUM(duration_seconds) as total_duration,
+                    MAX(UNIX_TIMESTAMP(viewed_at)) as last_viewed_at_unix
                     FROM view_history
-                    WHERE session_id = %s
-                    ORDER BY created_at DESC
-                    LIMIT 20
+                    WHERE user_id = %s
+                    GROUP BY real_estate_id
+                    ORDER BY last_viewed_at_unix DESC
                 """
                 cursor.execute(query, (session_id,))
             else:
@@ -51,36 +59,38 @@ class UserInterestAnalyzer:
                 return []
             view_history = raw_history
 
-        prop_ids = [item['real_estate_id'] for item in view_history]
-        if not prop_ids:
+        real_estate_ids = [item['real_estate_id'] for item in view_history]
+        if not real_estate_ids:
             return []
 
         cursor = self.db_conn.cursor(dictionary=True)
         try:
             # Lấy thông tin thuộc tính của các BDS người dùng đã xem
-            format_strings = ','.join(['%s'] * len(prop_ids))
+            format_strings = ','.join(['%s'] * len(real_estate_ids))
             query_props = f"""
-                SELECT id, category, price, area, district_id, city_id
-                FROM properties
-                WHERE id IN ({format_strings}) AND status = 'active'
+                SELECT id, category_id, price_vnd, acreage, district, city
+                FROM real_estates
+                WHERE id IN ({format_strings})
             """
-            cursor.execute(query_props, tuple(prop_ids))
+            cursor.execute(query_props, tuple(real_estate_ids))
             properties_data = {row['id']: row for row in cursor.fetchall()}
 
             if not properties_data:
                 return []
 
             # Thiết lập biến tính toán profile người dùng
-            now_unix = datetime.utcnow().timestamp()
+            now_unix = datetime.now(timezone.utc).timestamp()
             lambda_decay = 0.1  # Hệ số suy giảm theo thời gian 10% mỗi ngày
 
             user_profile = {
                 "categories": {},
-                "districts": {},
+                "district": {},
                 "weighted_price": 0.0,
                 "weighted_area": 0.0,
                 "total_weight": 0.0
             }
+            
+            print('view_history: ',view_history)
 
             for view in view_history:
                 prop_id = view['real_estate_id']
@@ -102,14 +112,14 @@ class UserInterestAnalyzer:
                 weight = duration_weight * time_decay
 
                 # Tích lũy sở thích
-                cat = prop['category']
+                cat = prop['category_id']
                 user_profile["categories"][cat] = user_profile["categories"].get(cat, 0.0) + weight
 
-                dist = prop['district_id']
-                user_profile["districts"][dist] = user_profile["districts"].get(dist, 0.0) + weight
+                district = prop['district']
+                user_profile["district"][district] = user_profile["district"].get(district, 0.0) + weight
 
-                user_profile["weighted_price"] += float(prop['price']) * weight
-                user_profile["weighted_area"] += float(prop['area']) * weight
+                user_profile["weighted_price"] += float(prop['price_vnd']) * weight
+                user_profile["weighted_area"] += float(prop['acreage']) * weight
                 user_profile["total_weight"] += weight
 
             if user_profile["total_weight"] == 0:
@@ -121,11 +131,11 @@ class UserInterestAnalyzer:
 
             # Lấy danh mục yêu thích và top 3 quận quan tâm nhiều nhất
             favorite_category = max(user_profile["categories"], key=user_profile["categories"].get)
-            sorted_districts = sorted(user_profile["districts"].items(), key=lambda x: x[1], reverse=True)
+            sorted_districts = sorted(user_profile["district"].items(), key=lambda x: x[1], reverse=True)
             favorite_districts = [item[0] for item in sorted_districts[:3]]
 
             # Tìm kiếm ứng viên (loại trừ các BDS người dùng đã xem)
-            excluded_ids_placeholder = ','.join(['%s'] * len(prop_ids))
+            excluded_ids_placeholder = ','.join(['%s'] * len(real_estate_ids))
             price_min, price_max = avg_price * 0.6, avg_price * 1.4
             area_min, area_max = avg_area * 0.5, avg_area * 1.5
 
@@ -133,20 +143,19 @@ class UserInterestAnalyzer:
             district_params = []
             if favorite_districts:
                 dist_placeholders = ','.join(['%s'] * len(favorite_districts))
-                district_clause = f"OR district_id IN ({dist_placeholders})"
+                district_clause = f"OR district IN ({dist_placeholders})"
                 district_params = favorite_districts
 
             query_candidates = f"""
-                SELECT id, category, price, area, district_id, latitude, longitude
-                FROM properties
+                SELECT id, category_id, price_vnd, acreage, district
+                FROM real_estates
                 WHERE id NOT IN ({excluded_ids_placeholder})
-                  AND status = 'active'
-                  AND category = %s
-                  AND (price BETWEEN %s AND %s OR area BETWEEN %s AND %s {district_clause})
+                  AND category_id = %s
+                  AND (price_vnd BETWEEN %s AND %s OR acreage BETWEEN %s AND %s {district_clause})
                 LIMIT 100
             """
 
-            query_params = list(prop_ids) + [favorite_category, price_min, price_max, area_min, area_max] + district_params
+            query_params = list(real_estate_ids) + [favorite_category, price_min, price_max, area_min, area_max] + district_params
             cursor.execute(query_candidates, query_params)
             candidates = cursor.fetchall()
 
@@ -154,21 +163,21 @@ class UserInterestAnalyzer:
             scored_candidates = []
             for item in candidates:
                 # 1. Khớp Category (Trọng số 30%)
-                cat_score = 1.0 if item['category'] == favorite_category else 0.0
+                cat_score = 1.0 if item['category_id'] == favorite_category else 0.0
 
                 # 2. Khớp Quận/Huyện (Trọng số 30%)
                 dist_score = 0.0
                 if favorite_districts:
-                    if item['district_id'] == favorite_districts[0]:
+                    if item['district'] == favorite_districts[0]:
                         dist_score = 1.0
-                    elif item['district_id'] in favorite_districts:
+                    elif item['district'] in favorite_districts:
                         dist_score = 0.6
 
                 # 3. Tiệm cận phân khúc ưa thích (Trọng số 40%)
-                price_diff_ratio = abs(float(item['price']) - avg_price) / avg_price
+                price_diff_ratio = abs(float(item['price_vnd']) - avg_price) / avg_price
                 price_match = max(0.0, 1.0 - (price_diff_ratio / 0.4))
 
-                area_diff_ratio = abs(float(item['area']) - avg_area) / avg_area
+                area_diff_ratio = abs(float(item['acreage']) - avg_area) / avg_area
                 area_match = max(0.0, 1.0 - (area_diff_ratio / 0.5))
 
                 profile_score = (price_match * 0.5) + (area_match * 0.5)
@@ -177,6 +186,7 @@ class UserInterestAnalyzer:
                 scored_candidates.append((item['id'], behavior_score))
 
             scored_candidates.sort(key=lambda x: x[1], reverse=True)
+            print("result:",scored_candidates)
             return [item[0] for item in scored_candidates[:limit]]
 
         except Exception as e:
